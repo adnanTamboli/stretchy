@@ -46,7 +46,20 @@
   .tip.ghost { border-style:dashed; opacity:0; }
   .tip.ghost.on { opacity:.7; }
 
-  @media (max-width:520px) { .btn .label { display:none; } .btn.both { width:38px; padding:0; justify-content:center; } .hint { font-size:13px; } }
+  /* comic "SLAP!" popups */
+  .pow { position:fixed; z-index:4; pointer-events:none; font-family:"Baloo 2", sans-serif; font-weight:800; font-size:44px;
+    color:#FFF3E0; -webkit-text-stroke:3px #3B2E24; paint-order:stroke fill; text-shadow:0 5px 0 #E2673D;
+    transform:translate(-50%, -50%) rotate(var(--r)) scale(.3); opacity:0; animation:pow .75s cubic-bezier(.2,1.6,.4,1) forwards; }
+  @keyframes pow {
+    0% { opacity:0; transform:translate(-50%, -50%) rotate(var(--r)) scale(.3); }
+    18% { opacity:1; transform:translate(-50%, -50%) rotate(var(--r)) scale(1.15); }
+    70% { opacity:1; transform:translate(-50%, -80%) rotate(var(--r)) scale(1); }
+    100% { opacity:0; transform:translate(-50%, -110%) rotate(var(--r)) scale(.95); } }
+  .star { position:fixed; z-index:4; pointer-events:none; font-size:20px; color:#FFE08A; text-shadow:0 0 6px #fff;
+    animation:star .6s ease-out forwards; }
+  @keyframes star { from { transform:translate(-50%, -50%) scale(1); opacity:1; } to { transform:translate(calc(-50% + var(--dx)), calc(-50% + var(--dy))) scale(.4); opacity:0; } }
+
+  @media (max-width:520px) { .btn .label, .chip small, .chip .word { display:none; } .btn.both { width:38px; padding:0; justify-content:center; } .hint { font-size:13px; } }
 </style>
 <script type="importmap">
 { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
@@ -56,7 +69,8 @@
 <div class="top">
   <div class="brand">Stretch<span>y</span></div>
   <div class="right">
-    <div class="chip" aria-live="polite">Stretch <b id="meter">100%</b><small>best <span id="best">100%</span></small></div>
+    <div class="chip" aria-live="polite"><span class="word">Stretch</span> <b id="meter">100%</b><small>best <span id="best">100%</span></small></div>
+    <div class="chip" aria-live="polite" title="Slaps">👋 <b id="slaps">0</b></div>
     <button class="btn both" id="both" aria-pressed="false" title="Mirror your pull to the other cheek">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h6M15 12h6M6 9l-3 3 3 3M18 9l3 3-3 3"/></svg>
       <span class="label">Both hands</span>
@@ -102,15 +116,20 @@ const uniforms = {
   uA: { value: Array.from({ length: SLOTS }, () => new THREE.Vector2()) },   // where each grab started (rest pose)
   uD: { value: Array.from({ length: SLOTS }, () => new THREE.Vector2()) },   // how far it has been pulled
   uR: { value: RADIUS },
+  uPunch: { value: new THREE.Vector3() },                                    // slap: xy = where, z = push (springs back)
+  uHit: { value: Array.from({ length: 3 }, () => new THREE.Vector3()) },    // last 3 slap marks: xy = where, z = redness
 };
 const faceMat = new THREE.ShaderMaterial({
   uniforms,
   vertexShader: `
-    uniform vec2 uA[${SLOTS}]; uniform vec2 uD[${SLOTS}]; uniform float uR;
-    varying vec2 vUv; varying float vStretch;
+    uniform vec2 uA[${SLOTS}]; uniform vec2 uD[${SLOTS}]; uniform float uR; uniform vec3 uPunch;
+    varying vec2 vUv; varying float vStretch; varying vec2 vRest;
     void main(){
-      vUv = uv;
+      vUv = uv; vRest = position.xy;
       vec2 p = position.xy; vec2 off = vec2(0.); float stretch = 0.; float lift = 0.;
+      // slap: the cheek that was hit gets shoved sideways; the rest of the head follows (in JS)
+      { vec2 rel = p - uPunch.xy; float w = exp(-dot(rel, rel)/(0.17*0.17));
+        off += vec2(uPunch.z, -abs(uPunch.z)*.12)*w; lift -= abs(uPunch.z)*w*.4; }
       for (int i = 0; i < ${SLOTS}; i++) {
         vec2 D = uD[i]; float L = length(D);
         if (L < 1e-5) continue;
@@ -128,9 +147,18 @@ const faceMat = new THREE.ShaderMaterial({
       gl_Position = projectionMatrix*modelViewMatrix*vec4(p + off, lift*.25, 1.);
     }`,
   fragmentShader: `
-    uniform sampler2D uMap; varying vec2 vUv; varying float vStretch;
+    uniform sampler2D uMap; uniform vec3 uHit[3]; varying vec2 vUv; varying float vStretch; varying vec2 vRest;
     void main(){
       vec3 col = texture2D(uMap, vUv).rgb;
+      // red handprint where he was slapped: an oval with finger stripes, only on skin (not hair or the wall)
+      float red = 0.;
+      for (int i = 0; i < 3; i++) {
+        vec2 r = (vRest - uHit[i].xy)*vec2(1., .8);
+        float hand = smoothstep(.11, .03, length(r))*(.72 + .28*sin(r.x*95.));
+        red = max(red, uHit[i].z*hand);
+      }
+      float skin = smoothstep(.04, .14, col.r - col.b);
+      col = mix(col, col*vec3(1.12, .7, .68) + vec3(.07, 0., 0.), clamp(red*skin, 0., 1.)*.85);
       // stretched skin goes a touch pinker and shinier
       float s = clamp(vStretch*1.4, 0., 1.);
       col = mix(col, col*vec3(1.07, .97, .95) + vec3(.035, .02, .02), s*.55);
@@ -230,7 +258,7 @@ function grab(e) {
   audio();
   demo = null;                                      // any real touch ends the intro demo
   const s = freeSlot(); if (!s) return;
-  Object.assign(s, { used: true, active: true, pointerId: e.pointerId, mirror: false });
+  Object.assign(s, { used: true, active: true, pointerId: e.pointerId, mirror: false, downT: performance.now() });
   s.A.copy(p); s.D.set(0, 0); s.V.set(0, 0); s.target.set(0, 0);
   // desktop "Both hands": a mirrored grab on the other cheek
   if (mirrorMode && !IS_TOUCH) {
@@ -256,12 +284,74 @@ function move(e) {
   }
 }
 function release(e) {
-  for (const s of slots) if (s.active && s.pointerId === e.pointerId) {
+  const mine = slots.filter(s => s.active && s.pointerId === e.pointerId);
+  const main = mine.find(s => !s.mirror);
+  if (main) {
+    // a quick tap is a slap; so is a fast swipe. Holding and dragging is a stretch.
+    const held = performance.now() - main.downT, pulled = main.target.length();
+    const tap = held < 230 && pulled < 0.035, swipe = held < 320 && pulled > 0.09;
+    if (tap || swipe) {
+      const dir = swipe ? Math.sign(main.target.x || 1) : (main.A.x < FACE.cx ? 1 : -1);
+      for (const s of mine) { s.active = false; s.D.set(0, 0); s.V.set(0, 0); }
+      slap(main.A, dir, swipe ? Math.min(1, pulled * 2.5) : 0.6, e.clientX, e.clientY);
+      canvas.classList.remove('grabbing');
+      return;
+    }
+  }
+  for (const s of mine) {
     s.active = false;
     const L = s.D.length();
-    if (!s.mirror) { boing(L); jiggle = Math.min(1, jiggle + L * 1.2); if (navigator.vibrate && L > 0.15) navigator.vibrate(18); }
+    if (!s.mirror) { boing(L); jiggle = Math.min(1, jiggle + L * 1.2); if (L > 0.15) buzz(18); }
   }
   canvas.classList.remove('grabbing');
+}
+
+// phone buzz; browsers only allow it after a real touch, so check first to keep the console clean
+const buzz = ms => { if (navigator.vibrate && navigator.userActivation?.hasBeenActive) navigator.vibrate(ms); };
+
+/* ---------- slap: head jolts away, red handprint, comic popup, crack sound, screen shake ---------- */
+const punch = { x: 0, y: 0, P: 0, V: 0 };
+let hitIndex = 0, slapCount = 0, shake = 0;
+const slapsEl = document.getElementById('slaps');
+const WORDS = ['SLAP!', 'WHAP!', 'SMACK!', 'THWACK!', 'POW!'];
+function slap(at, dir, strength, sx, sy) {
+  punch.x = at.x; punch.y = at.y;
+  punch.V += dir * (3.2 + strength * 4.5);
+  const h = uniforms.uHit.value[hitIndex++ % 3]; h.set(at.x, at.y, 0.7 + strength * 0.3);
+  jiggle = Math.min(1, jiggle + 0.5 + strength * 0.4);
+  shake = REDUCED ? 0 : 0.6 + strength * 0.6;
+  slapCount += 1; slapsEl.textContent = slapCount;
+  slapSound(strength);
+  buzz(30);
+  if (!hintHidden) { hintHidden = true; hintEl.classList.add('hide'); }
+  if (REDUCED) return;
+  const pow = document.createElement('div');
+  pow.className = 'pow'; pow.textContent = WORDS[Math.floor(Math.random() * WORDS.length)];
+  pow.style.left = sx - dir * 40 + 'px'; pow.style.top = sy - 30 + 'px'; pow.style.setProperty('--r', (Math.random() * 30 - 15) + 'deg');
+  document.body.appendChild(pow); setTimeout(() => pow.remove(), 800);
+  for (let i = 0; i < 6; i++) {
+    const st = document.createElement('div'); st.className = 'star'; st.textContent = '✦';
+    const a = Math.random() * Math.PI * 2, d = 50 + Math.random() * 50;
+    st.style.left = sx + 'px'; st.style.top = sy + 'px';
+    st.style.setProperty('--dx', Math.cos(a) * d + 'px'); st.style.setProperty('--dy', Math.sin(a) * d + 'px');
+    document.body.appendChild(st); setTimeout(() => st.remove(), 650);
+  }
+}
+let noiseBuf = null;
+function slapSound(strength) {
+  if (!actx || !soundOn) return;
+  const t = actx.currentTime;
+  if (!noiseBuf) { noiseBuf = actx.createBuffer(1, actx.sampleRate * 0.3, actx.sampleRate); const d = noiseBuf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1; }
+  // the crack: a bright noise burst
+  const n = actx.createBufferSource(), hp = actx.createBiquadFilter(), g = actx.createGain();
+  n.buffer = noiseBuf; hp.type = 'highpass'; hp.frequency.value = 900;
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.5 + strength * 0.3, t + 0.003); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.14);
+  n.connect(hp).connect(g).connect(actx.destination); n.start(t); n.stop(t + 0.2);
+  // the thump underneath
+  const o = actx.createOscillator(), og = actx.createGain();
+  o.frequency.setValueAtTime(170, t); o.frequency.exponentialRampToValueAtTime(60, t + 0.12);
+  og.gain.setValueAtTime(0.0001, t); og.gain.exponentialRampToValueAtTime(0.35, t + 0.005); og.gain.exponentialRampToValueAtTime(0.0001, t + 0.16);
+  o.connect(og).connect(actx.destination); o.start(t); o.stop(t + 0.2);
 }
 canvas.addEventListener('pointerdown', grab);
 canvas.addEventListener('pointermove', move);
@@ -271,7 +361,7 @@ canvas.addEventListener('lostpointercapture', release);
 
 /* ---------- intro: he gets his cheeks pulled once, so people see what to do ---------- */
 const hintEl = document.getElementById('hint');
-hintEl.textContent = IS_TOUCH ? 'Grab his cheeks and pull 👐 Two fingers = both sides' : 'Click and drag his face · try “Both hands”';
+hintEl.textContent = IS_TOUCH ? 'Hold & pull to stretch 👐 · quick tap to slap 👋' : 'Drag his face to stretch · quick click to slap 👋';
 let ready = false;
 function startDemo() {
   const l = freeSlot(); Object.assign(l, { used: true, active: true, pointerId: -1, mirror: false }); l.A.copy(CHEEK_L);
@@ -355,8 +445,16 @@ renderer.setAnimationLoop(() => {
   jiggle = damp(jiggle, 0, 2.2, dt);
   const j = REDUCED ? 0 : Math.sin(t * 17) * jiggle;
   faceMesh.scale.set(1 + j * 0.035, 1 - j * 0.03, 1);
-  faceMesh.rotation.z = REDUCED ? 0 : Math.sin(t * 13) * jiggle * 0.03;
+  // slap spring: the hit cheek shoves over, the head turns and swings back
+  for (let n = 0; n < 2; n++) { const h = dt / 2; punch.V += (-260 * punch.P - 11 * punch.V) * h; punch.P += punch.V * h; }
+  if (REDUCED) punch.P = punch.V = 0;
+  uniforms.uPunch.value.set(punch.x, punch.y, punch.P * 0.28);
+  for (const h of uniforms.uHit.value) h.z *= Math.exp(-dt * 0.45);          // handprints fade over a few seconds
+  faceMesh.rotation.z = (REDUCED ? 0 : Math.sin(t * 13) * jiggle * 0.03) - punch.P * 0.22;
+  faceMesh.position.x = punch.P * 0.07;
   faceMesh.position.y = REDUCED ? 0 : Math.sin(t * 1.3) * 0.004;
+  shake = damp(shake, 0, 12, dt);
+  camera.position.x = (Math.random() - 0.5) * shake * 0.05; camera.position.y = (Math.random() - 0.5) * shake * 0.05;
 
   renderer.render(scene, camera);
 });
